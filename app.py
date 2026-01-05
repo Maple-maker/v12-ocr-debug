@@ -12,16 +12,16 @@ def index():
 @app.route('/generate', methods=['POST'])
 def generate():
     if 'bom_file' not in request.files:
-        return render_template('index.html')
+        return render_template('index.html', error='No BOM PDF uploaded')
     
     if 'template_file' not in request.files:
-        return render_template('index.html')
+        return render_template('index.html', error='No DD1750 Template PDF uploaded')
     
     bom_file = request.files['bom_file']
     template_file = request.files['template_file']
     
     if bom_file.filename == '' or template_file.filename == '':
-        return render_template('index.html')
+        return render_template('index.html', error='Both files must be selected')
     
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -32,24 +32,27 @@ def generate():
             bom_file.save(bom_path)
             template_file.save(tpl_path)
             
+            # Pass start_page
+            start_page = int(request.form.get('start_page', 0))
             out_path, count = generate_dd1750_from_pdf(
                 bom_pdf_path=bom_path,
                 template_pdf_path=tpl_path,
-                out_pdf_path=out_path
+                out_pdf_path=out_path,
+                start_page=start_page
             )
             
-            if count == 0:
-                return render_template('index.html')
-            
+            # Check file exists before sending
             if not os.path.exists(out_path):
-                print("ERROR: Output file not found!")
-                return render_template('index.html')
+                print(f"ERROR: Output file not created at {out_path}")
+                return render_template('index.html', error='Internal error: PDF could not be generated')
             
             return send_file(out_path, as_attachment=True, download_name='DD1750.pdf')
     
     except Exception as e:
         print(f"ERROR: {e}")
-        return render_template('index.html')
+        import traceback
+        traceback.print_exc()
+        return render_template('index.html', error=f"Error: {str(e)}")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
