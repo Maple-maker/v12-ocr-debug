@@ -32,26 +32,24 @@ def generate():
             bom_file.save(bom_path)
             template_file.save(tpl_path)
             
-            # Pass start_page
-            start_page = int(request.form.get('start_page', 0))
-            out_path, count = generate_dd1750_from_pdf(
-                bom_pdf_path=bom_path,
-                template_pdf_path=tpl_path,
-                out_pdf_path=out_path,
-                start_page=start_page
-            )
+            # FIX: Don't pass start_page, default to 0
+            out_path, count = generate_dd1750_from_pdf(bom_path, tpl_path, out_path)
             
-            # Check file exists before sending
+            if count == 0:
+                return render_template('index.html', error='No items found')
+            
+            # FIX: Check file exists before sending
             if not os.path.exists(out_path):
-                print(f"ERROR: Output file not created at {out_path}")
+                print("ERROR: Output file not created!")
                 return render_template('index.html', error='Internal error: PDF could not be generated')
+            
+            file_size = os.path.getsize(out_path)
+            print(f"SUCCESS: Output file size: {file_size} bytes")
             
             return send_file(out_path, as_attachment=True, download_name='DD1750.pdf')
     
     except Exception as e:
         print(f"ERROR: {e}")
-        import traceback
-        traceback.print_exc()
         return render_template('index.html', error=f"Error: {str(e)}")
 
 if __name__ == '__main__':
