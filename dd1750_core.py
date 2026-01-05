@@ -1,9 +1,8 @@
-"""DD1750 core - Simple, Working Version."""
+"""DD1750 core - Robust."""
 
 import io
 import math
 import re
-import os
 from dataclasses import dataclass
 from typing import List
 
@@ -24,10 +23,10 @@ X_INIT_L, X_INIT_R = 408.5, 453.5
 X_SPARES_L, X_SPARES_R = 453.5, 514.5
 X_TOTAL_L, X_TOTAL_R = 514.5, 566.0
 
-Y_TABLE_TOP = 616.0
-Y_TABLE_BOTTOM = 89.5
+Y_TABLE_TOP_LINE = 616.0
+Y_TABLE_BOTTOM_LINE = 89.5
 ROWS_PER_PAGE = 18
-ROW_H = (Y_TABLE_TOP - Y_TABLE_BOTTOM) / ROWS_PER_PAGE
+ROW_H = (Y_TABLE_TOP_LINE - Y_TABLE_BOTTOM_LINE) / ROWS_PER_PAGE
 PAD_X = 3.0
 
 
@@ -77,25 +76,14 @@ def extract_items_from_pdf(pdf_path: str, start_page: int = 0) -> List[BomItem]:
                         if not lv_cell or str(lv_cell).strip().upper() != 'B':
                             continue
                         
-                        desc_cell = row[desc_idx] if desc_idx < len(row) else None
+                        desc_cell = row[desc_idx]
+                        # FIX: Use entire cell content
                         description = ""
-                        
                         if desc_cell:
-                            text = str(desc_cell).strip()
-                            lines = text.split('\n')
-                            
-                            # Handle descriptions on different lines
-                            if len(lines) >= 2:
-                                description = lines[1].strip()
-                            else:
-                                description = lines[0].strip()
-                            
-                            # Cleanup parentheses and codes
-                            if '(' in description:
-                                description = description.split('(')[0].strip()
-                            
-                            description = re.sub(r'\s+(WTY|ARC|CIIC|UI|SCMC|EA|AY|9K|9G)$', '', description, flags=re.IGNORECASE)
-                            description = re.sub(r'\s+', ' ', description).strip()
+                            description = str(desc_cell).strip()
+                            # Remove newline characters, keep as single line
+                            description = description.replace('\n', ' ').replace('\r', ' ')
+                            description = description.strip()
                             
                         if not description:
                             continue
@@ -108,7 +96,6 @@ def extract_items_from_pdf(pdf_path: str, start_page: int = 0) -> List[BomItem]:
                                 if match:
                                     nsn = match.group(1)
                         
-                        # Get quantity from Auth Qty column
                         qty = 1
                         if auth_idx > -1 and auth_idx < len(row):
                             qty_cell = row[auth_idx]
@@ -129,29 +116,21 @@ def extract_items_from_pdf(pdf_path: str, start_page: int = 0) -> List[BomItem]:
 def generate_dd1750_from_pdf(bom_path: str, template_path: str, out_path: str, start_page: int = 0):
     items = extract_items_from_pdf(bom_path, start_page)
     
-    print(f"\nItems found: {len(items)}")
-    
     if not items:
-        reader = PdfReader(template_path)
-        writer = PdfWriter()
-        writer.add_page(reader.pages[0])
-        with open(out_path, 'wb') as f:
-            writer.write(f)
         return out_path, 0
     
     total_pages = math.ceil(len(items) / ROWS_PER_PAGE)
     writer = PdfWriter()
-    template_reader = PdfReader(template_path)
     
     for page_num in range(total_pages):
         start_idx = page_num * ROWS_PER_PAGE
         end_idx = min((page_num + 1) * ROWS_PER_PAGE, len(items))
         page_items = items[start_idx:end_idx]
         
-        # Create overlay
         packet = io.BytesIO()
-        c = canvas.Canvas(packet, pagesize=letter)
-        first_row = Y_TABLE_TOP - 5.0
+        c = canvas.Canvas(packet, pagesize=(PAGE_W, PAGE_H))
+        
+        first_row = Y_TABLE_TOP_LINE - 5.0
         
         for i, item in enumerate(page_items):
             y = first_row - (i * ROW_H)
@@ -175,10 +154,10 @@ def generate_dd1750_from_pdf(bom_path: str, template_path: str, out_path: str, s
         c.save()
         packet.seek(0)
         
-        # Merge overlay
         overlay = PdfReader(packet)
         
-        # Use first page of template for all pages to ensure consistent background
+        # Use first page of template for all
+        template_reader = PdfReader(template_path)
         if page_num < len(template_reader.pages):
             page = template_reader.pages[page_num]
         else:
@@ -187,7 +166,6 @@ def generate_dd1750_from_pdf(bom_path: str, template_path: str, out_path: str, s
         page.merge_page(overlay.pages[0])
         writer.add_page(page)
     
-    # Write to file
     with open(out_path, 'wb') as f:
         writer.write(f)
     
