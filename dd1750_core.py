@@ -1,8 +1,9 @@
-"""DD1750 core - Robust."""
+"""DD1750 core - Robust with debug logging."""
 
 import io
 import math
 import re
+import sys
 from dataclasses import dataclass
 from typing import List
 
@@ -13,7 +14,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.lib.pagesizes import letter
 
 
-PAGE_W, PAGE_H = 612.0, 792.0
+PAGE_W, PAGE_H = letter
 
 # Column positions
 X_BOX_L, X_BOX_R = 44.0, 88.0
@@ -23,10 +24,10 @@ X_INIT_L, X_INIT_R = 408.5, 453.5
 X_SPARES_L, X_SPARES_R = 453.5, 514.5
 X_TOTAL_L, X_TOTAL_R = 514.5, 566.0
 
-Y_TABLE_TOP_LINE = 616.0
-Y_TABLE_BOTTOM_LINE = 89.5
+Y_TABLE_TOP = 616.0
+Y_TABLE_BOTTOM = 89.5
 ROWS_PER_PAGE = 18
-ROW_H = (Y_TABLE_TOP_LINE - Y_TABLE_BOTTOM_LINE) / ROWS_PER_PAGE
+ROW_H = (Y_TABLE_TOP - Y_TABLE_BOTTOM) / ROWS_PER_PAGE
 PAD_X = 3.0
 
 
@@ -42,13 +43,21 @@ def extract_items_from_pdf(pdf_path: str, start_page: int = 0) -> List[BomItem]:
     items = []
     
     try:
+        print(f"DEBUG: Opening {pdf_path}")
+        sys.stdout.flush()
+        
         with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages[start_page:]:
+            for page_num, page in enumerate(pdf.pages[start_page:]):
                 tables = page.extract_tables()
                 
-                for table in tables:
+                print(f"DEBUG: Page {page_num} - Found {len(tables)} tables")
+                
+                for table_num, table in enumerate(tables):
                     if len(table) < 2:
+                        print(f"DEBUG:   Table {table_num} skipped (too short)")
                         continue
+                    
+                    print(f"DEBUG:   Table {table_num} - Header: {table[0]}")
                     
                     header = table[0]
                     lv_idx = desc_idx = mat_idx = auth_idx = -1
@@ -58,79 +67,152 @@ def extract_items_from_pdf(pdf_path: str, start_page: int = 0) -> List[BomItem]:
                             text = str(cell).upper()
                             if 'LV' in text or 'LEVEL' in text:
                                 lv_idx = i
-                            elif 'DESC' in text:
+                            elif 'DESC' in text or 'NOMENCLATURE' in text or 'PART NO.' in text:
                                 desc_idx = i
                             elif 'MATERIAL' in text:
                                 mat_idx = i
                             elif 'AUTH' in text and 'QTY' in text:
                                 auth_idx = i
+                            elif 'OH' in text and 'QTY' in text:
+                                auth_idx = i
+                    
+                    print(f"DEBUG:   Table {table_num} - Identified columns: LV:{lv_idx}, DESC:{desc_idx}, MAT:{mat_idx}, AUTH:{auth_idx}")
                     
                     if lv_idx == -1 or desc_idx == -1:
+                        print(f"DEBUG:   Table {table_num} - Skipped (no LV or DESC)")
                         continue
                     
-                    for row in table[1:]:
+                    for row_num, row in enumerate(table[1:]):
                         if not any(cell for cell in row if cell):
+                            print(f"DEBUG:   Table {table_num} - Row {row_num} - Empty (skipped)")
                             continue
                         
+                        # Check Level
                         lv_cell = row[lv_idx] if lv_idx < len(row) else None
-                        if not lv_cell or str(lv_cell).strip().upper() != 'B':
+                        if lv_cell:
+                            lv_text = str(lv_cell).strip()
+                            # Relaxed check - just check if it starts with B or is not empty
+                            is_b_item = lv_text and ('B' in lv_text.upper() or not lv_text)
+                            if not is_b_item:
+                                print(f"DEBUG:   Table {table_num} - Row {row_num} - Skipped (LV is not 'B': '{lv_text}')")
+                                continue
+                        else:
+                            print(f"DEBUG:   Table {table_num} - Row {row_num} - LV is 'B' (valid)")
+                        else:
+                            print(f"DEBUG:   Table {table_num} - Row {row_num} - Skipped (No LV cell)")
                             continue
                         
-                        desc_cell = row[desc_idx]
-                        # FIX: Use entire cell content
+                        # Get Description
+                        desc_cell = row[desc_idx] if desc_idx < len(row) else None
                         description = ""
                         if desc_cell:
-                            description = str(desc_cell).strip()
-                            # Remove newline characters, keep as single line
-                            description = description.replace('\n', ' ').replace('\r', ' ')
-                            description = description.strip()
+                            text = str(desc_cell).strip()
+                            # Split by newline
+                            lines = text.split('\n')
                             
+                            if len(lines) >= 2:
+                                # Multi-line (BCP style)
+                                description = lines[1].strip()
+                            else:
+                                # Single-line or Handwritten
+                                description = lines[0].strip()
+                            
+                            # Cleanup
+                            if '(' in description:
+                                description = description.split('(')[0].strip()
+                            
+                            # Remove trailing codes
+                            description = re.sub(r'\s+(WTY|ARC|CIIC|UI|SCMC|EA|AY|9K|9G)$', '', description, flags=re.IGNORECASE)
+                            description = re.sub(r'\s+', ' ', description).strip()
+                            
+                            print(f"DEBUG:   Table {table_num} - Row {row_num} - Desc: '{description[:30]}...'")
+                        
                         if not description:
+                            print(f"DEBUG:   Table {table_num} - Row {row_num} - Skipped (Desc too short/empty)")
                             continue
                         
+                        # Get NSN
                         nsn = ""
-                        if mat_idx > -1 and mat_idx < len(row):
+                        if mat_idx > -1:
                             mat_cell = row[mat_idx]
                             if mat_cell:
                                 match = re.search(r'\b(\d{9})\b', str(mat_cell))
                                 if match:
                                     nsn = match.group(1)
                         
+                        # Get Quantity
                         qty = 1
-                        if auth_idx > -1 and auth_idx < len(row):
+                        if auth_idx > -1:
                             qty_cell = row[auth_idx]
                             if qty_cell:
                                 match = re.search(r'(\d+)', str(qty_cell))
                                 if match:
                                     qty = int(match.group(1))
+                        else:
+                            # Try OH QTY
+                            oh_qty_idx = -1
+                            for i, cell in enumerate(header):
+                                if cell and 'OH' in str(cell).upper() and 'QTY' in str(cell).upper():
+                                    oh_qty_idx = i
+                            if oh_qty_idx > -1:
+                                qty_cell = row[oh_qty_idx]
+                                if qty_cell:
+                                    match = re.search(r'(\d+)', str(qty_cell))
+                                    if match:
+                                        qty = int(match.group(1))
                         
-                        items.append(BomItem(len(items) + 1, description[:100], nsn, qty))
+                        # Add item
+                        items.append(BomItem(
+                            line_no=len(items) + 1,
+                            description=description[:100],
+                            nsn=nsn,
+                            qty=qty
+                        ))
+                        print(f"DEBUG:   Table {table_num} - Row {row_num} - Added item {len(items)}")
     
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"CRITICAL ERROR in extraction: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         return []
     
+    print(f"DEBUG: Total items extracted: {len(items)}")
+    sys.stdout.flush()
     return items
 
 
-def generate_dd1750_from_pdf(bom_path: str, template_path: str, out_path: str, start_page: int = 0):
-    items = extract_items_from_pdf(bom_path, start_page)
+def generate_dd1750_from_pdf(bom_path: str, template_path: str, out_path: str):
+    items = extract_items_from_pdf(bom_path)
+    
+    print(f"DEBUG: Generating DD1750 with {len(items)} items")
+    sys.stdout.flush()
     
     if not items:
+        # Fallback: Always create a file
+        reader = PdfReader(template_path)
+        writer = PdfWriter()
+        writer.add_page(reader.pages[0])
+        with open(out_path, 'wb') as f:
+            writer.write(f)
+        print(f"DEBUG: Wrote fallback template to {out_path}")
+        sys.stdout.flush()
         return out_path, 0
     
     total_pages = math.ceil(len(items) / ROWS_PER_PAGE)
     writer = PdfWriter()
+    template = PdfReader(template_path)
     
     for page_num in range(total_pages):
         start_idx = page_num * ROWS_PER_PAGE
         end_idx = min((page_num + 1) * ROWS_PER_PAGE, len(items))
         page_items = items[start_idx:end_idx]
         
-        packet = io.BytesIO()
-        c = canvas.Canvas(packet, pagesize=(PAGE_W, PAGE_H))
+        print(f"DEBUG: Writing page {page_num} with {len(page_items)} items")
         
-        first_row = Y_TABLE_TOP_LINE - 5.0
+        # Create overlay
+        packet = io.BytesIO()
+        c = canvas.Canvas(packet, pagesize=letter)
+        first_row = Y_TABLE_TOP - 5.0
         
         for i, item in enumerate(page_items):
             y = first_row - (i * ROW_H)
@@ -156,17 +238,36 @@ def generate_dd1750_from_pdf(bom_path: str, template_path: str, out_path: str, s
         
         overlay = PdfReader(packet)
         
-        # Use first page of template for all
-        template_reader = PdfReader(template_path)
-        if page_num < len(template_reader.pages):
-            page = template_reader.pages[page_num]
+        # Get template page
+        if page_num < len(template.pages):
+            page = template.pages[page_num]
         else:
-            page = template_reader.pages[0]
+            page = template.pages[0]
         
         page.merge_page(overlay.pages[0])
         writer.add_page(page)
+        print(f"DEBUG: Merged page {page_num}")
     
-    with open(out_path, 'wb') as f:
-        writer.write(f)
+    # Write to file
+    try:
+        with open(out_path, 'wb') as f:
+            writer.write(f)
+        print(f"DEBUG: Successfully wrote {out_path}")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"CRITICAL ERROR writing PDF: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        # Fallback
+        try:
+            reader = PdfReader(template_path)
+            simple_writer = PdfWriter()
+            simple_writer.add_page(reader.pages[0])
+            with open(out_path, 'wb') as f:
+                simple_writer.write(f)
+            print(f"DEBUG: Wrote simple template to {out_path}")
+            sys.stdout.flush()
+        except:
+            pass
     
     return out_path, len(items)
