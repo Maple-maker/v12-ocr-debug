@@ -1,5 +1,6 @@
 import os
 import tempfile
+import sys
 from flask import Flask, render_template, request, send_file
 from dd1750_core import generate_dd1750_from_pdf
 
@@ -23,33 +24,62 @@ def generate():
     if bom_file.filename == '' or template_file.filename == '':
         return render_template('index.html', error='Both files must be selected')
     
+    if not (bom_file.filename.lower().endswith('.pdf') and template_file.filename.lower().endswith('.pdf')):
+        return render_template('index.html', error='Both files must be PDF format')
+    
+    start_page = 0
+    try:
+        start_page = int(request.form.get('start_page', 0))
+    except:
+        start_page = 0
+    
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             bom_path = os.path.join(tmpdir, 'bom.pdf')
             tpl_path = os.path.join(tmpdir, 'template.pdf')
             out_path = os.path.join(tmpdir, 'DD1750.pdf')
             
+            print(f"DEBUG: Saving files...")
+            print(f"DEBUG:   BOM: {bom_file.filename}")
+            print(f"DEBUG:   TPL: {template_file.filename}")
+            print(f"DEBUG:   OUT: {out_path}")
+            
             bom_file.save(bom_path)
             template_file.save(tpl_path)
+            sys.stdout.flush()
             
-            # FIX: Don't pass start_page, default to 0
-            out_path, count = generate_dd1750_from_pdf(bom_path, tpl_path, out_path)
+            print(f"DEBUG: Generating DD1750...")
+            out_path, count = generate_dd1750_from_pdf(
+                bom_path=bom_path,
+                template_path=tpl_path,
+                out_path=out_path
+            )
+            
+            print(f"DEBUG: Generated {count} items")
+            sys.stdout.flush()
             
             if count == 0:
-                return render_template('index.html', error='No items found')
+                return render_template('index.html', error='No items found in BOM')
             
-            # FIX: Check file exists before sending
             if not os.path.exists(out_path):
-                print("ERROR: Output file not created!")
+                print(f"ERROR: Output file does not exist at {out_path}")
                 return render_template('index.html', error='Internal error: PDF could not be generated')
             
             file_size = os.path.getsize(out_path)
-            print(f"SUCCESS: Output file size: {file_size} bytes")
+            print(f"DEBUG: Output file size: {file_size}")
+            sys.stdout.flush()
             
+            if file_size == 0:
+                print("ERROR: Output file is 0 bytes!")
+                return render_template('index.html', error='Internal error: Generated PDF is empty')
+            
+            print("DEBUG: Sending file to user...")
             return send_file(out_path, as_attachment=True, download_name='DD1750.pdf')
     
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"CRITICAL ERROR: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         return render_template('index.html', error=f"Error: {str(e)}")
 
 if __name__ == '__main__':
